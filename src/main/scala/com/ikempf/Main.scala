@@ -20,7 +20,7 @@ object Main extends IOApp {
       consumeQueueStreamPre,
       consumeQueueStreamPreDrop,
       splitConsumeQueue,
-      //      multiConsumeQueue,
+      multiConsumeQueue,
     ).tupled
       .as(ExitCode.Success)
 
@@ -110,7 +110,7 @@ object Main extends IOApp {
               IO(queue.dequeue.take(2))
           ))
       .flatMap {
-        case Left((_, fiber))  =>
+        case Left((_, fiber)) =>
           println("left")
           fiber.join
         case Right((fiber, a)) =>
@@ -119,15 +119,48 @@ object Main extends IOApp {
       }
 
   private def splitConsumeQueue: IO[Unit] =
-    queueStreamPost.flatMap(queue =>
-      ConcurrentEffect[IO]
-        .racePair(compile("QueueHead", queue.head), compile("QueueTail", queue.tail))
-        .flatMap {
-          case Left((_, fiber)) => fiber.join
-          case Right((fiber, _)) => fiber.join
-        }
-        .void
-    )
+    section(splitStream)
+
+  private def splitStream: IO[Unit] =
+    aQueue
+      .flatMap(
+        queue =>
+          ConcurrentEffect[IO]
+            .racePair(compile("QueueHead", queue.head),
+                      IO.sleep(1.second).productR(compile("QueueTail", queue.tail.take(3))))
+            .flatMap {
+              case Left((_, fiber)) =>
+                println("left2")
+                fiber.join
+              case Right((fiber, _)) =>
+                println("right2")
+                fiber.join
+            }
+            .void)
+
+  private def multiConsumeQueue: IO[Unit] =
+    section(multiStream)
+
+  private def multiStream: IO[Unit] =
+    aQueue
+      .flatMap(
+        queue =>
+          ConcurrentEffect[IO]
+            .racePair(compile("QueueHead", queue.head), IO.sleep(1.second).productR(compile("QueueTail", queue.tail)))
+            .flatMap {
+              case Left((_, fiber)) =>
+                println("left2")
+                fiber.join
+              case Right((fiber, _)) =>
+                println("right2")
+                fiber.join
+            }
+            .void)
+
+  private def section[A](block: IO[A]): IO[A] =
+    IO.delay(println("-----------------------"))
+      .productR(block)
+      .productL(IO.delay(println("")))
 
   private def compile[A: Show](name: String, stream: Stream[IO, A]): IO[Unit] =
     IO.delay(println(show"Consuming '$name' stream"))

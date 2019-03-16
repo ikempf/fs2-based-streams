@@ -18,70 +18,105 @@ object Main extends IOApp {
       splitConsumeSeqStream,
       consumeQueueStreamPost,
       consumeQueueStreamPre,
+      consumeQueueStreamPreDrop,
       splitConsumeQueue,
-      multiConsumeQueue,
-    )
-      .tupled
+      //      multiConsumeQueue,
+    ).tupled
       .as(ExitCode.Success)
 
   private def consumeSingletonStream: IO[Unit] =
-    compile("Singleton", singletonStream)
+    section(compile("Singleton", singletonStream))
 
   private def singletonStream: Stream[IO, String] =
     Stream.emit[IO, String]("a")
 
   private def consumeSeqStream: IO[Unit] =
-    compile("Seq", seqStream)
+    section(compile("Seq", seqStream))
 
   private def seqStream: Stream[IO, String] =
     Stream.emits[IO, String](List("m1", "m2", "m3", "m4", "m5"))
 
   private def multiConsumeSeqStream: IO[Unit] =
-    (compile("SeqFst", seqStream), compile("SeqSnd", seqStream)).tupled.void
+    section((compile("SeqFst", seqStream), compile("SeqSnd", seqStream)).tupled.void)
 
   private def splitConsumeSeqStream: IO[Unit] =
-    (compile("SeqHead", seqStream.head), compile("SeqTail", seqStream.tail)).tupled.void
+    section((compile("SeqHead", seqStream.head), compile("SeqTail", seqStream.tail)).tupled.void)
+
+  // ----------------- Queue based streams -----------------
+  val input = List("q1", "q2", "q3", "q4", "q5")
 
   private def consumeQueueStreamPost: IO[Unit] =
-    queueStreamPost.flatMap(compile("Queue post enqueue", _))
+    section(queueStreamPost)
 
-  private def queueStreamPost: IO[Stream[IO, String]] =
-    Queue.unbounded[IO, String].flatMap(queue => {
-      val input = List("q1", "q2", "q3", "q4", "q5")
-      ConcurrentEffect[IO].racePair(
-        IO.sleep(1.second).productR(Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain),
-        IO(queue.dequeue.take(input.length))
-      ).flatMap {
-        case Left((_, fiber)) => fiber.join
-        case Right((fiber, a)) => fiber.join.as(a)
-      }
-    })
+  private def queueStreamPost: IO[Unit] =
+    Queue
+      .unbounded[IO, String]
+      .flatMap(queue => {
+        ConcurrentEffect[IO]
+          .racePair(
+            IO.sleep(1.second).productR(Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain),
+            compile("Queue post enqueue", queue.dequeue.take(input.length))
+          )
+          .flatMap {
+            case Left((_, fiber))  => fiber.join
+            case Right((fiber, a)) => fiber.join.as(a)
+          }
+      })
 
   private def consumeQueueStreamPre: IO[Unit] =
-    queueInstantStream.flatMap(compile("Queue pre enqueue", _))
+    section(queueStreamPre)
 
-  private def queueInstantStream: IO[Stream[IO, String]] =
-    Queue.unbounded[IO, String].flatMap(queue => {
-      val input = List("q1", "q2", "q3", "q4", "q5")
-      ConcurrentEffect[IO].racePair(
-        Stream.emits[IO, String](input).evalTap(e => queue.enqueue1(e)).compile.drain,
-        IO.sleep(1.second).as(queue.dequeue.take(input.length))
-      ).flatMap {
-        case Left((_, fiber)) => fiber.join
-        case Right((fiber, a)) => fiber.join.as(a)
+  private def queueStreamPre: IO[Unit] =
+    Queue
+      .bounded[IO, String](2)
+      .flatMap(queue => {
+        ConcurrentEffect[IO]
+          .racePair(
+            Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain,
+            IO.sleep(1.second).productR(compile("Queue pre enqueue blocking backpressure", queue.dequeue.take(5)))
+          )
+          .flatMap {
+            case Left((_, fiber))  => fiber.join
+            case Right((fiber, a)) => fiber.join.as(a)
+          }
+      })
+
+  private def consumeQueueStreamPreDrop: IO[Unit] =
+    section(queueStreamPreDrop)
+
+  private def queueStreamPreDrop: IO[Unit] =
+    Queue
+      .circularBuffer[IO, String](2)
+      .flatMap(queue => {
+        ConcurrentEffect[IO]
+          .racePair(
+            Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain,
+            IO.sleep(1.second).productR(compile("Queue pre enqueue dropping backpressure", queue.dequeue.take(2)))
+          )
+          .flatMap {
+            case Left((_, fiber))  => fiber.join
+            case Right((fiber, a)) => fiber.join.as(a)
+          }
+      })
+
+  private def aQueue =
+    Queue
+      .unbounded[IO, String]
+      .flatMap(
+        queue =>
+          ConcurrentEffect[IO]
+            .racePair(
+              IO.sleep(1.second).productR(Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain),
+              IO(queue.dequeue.take(2))
+          ))
+      .flatMap {
+        case Left((_, fiber))  =>
+          println("left")
+          fiber.join
+        case Right((fiber, a)) =>
+          println("right")
+          fiber.join.as(a)
       }
-    })
-
-  private def multiConsumeQueue: IO[Unit] =
-    queueStreamPost.flatMap(queue =>
-      ConcurrentEffect[IO]
-        .racePair(compile("QueueFst", queue.take(1)), compile("QueueSnd", queue.take(1)))
-        .flatMap {
-          case Left((_, fiber)) => fiber.join
-          case Right((fiber, _)) => fiber.join
-        }
-        .void
-    )
 
   private def splitConsumeQueue: IO[Unit] =
     queueStreamPost.flatMap(queue =>
@@ -95,17 +130,16 @@ object Main extends IOApp {
     )
 
   private def compile[A: Show](name: String, stream: Stream[IO, A]): IO[Unit] =
-    IO
-      .delay(println(show"Consuming '$name' stream"))
+    IO.delay(println(show"Consuming '$name' stream"))
       .productR(
         stream
           .evalTap(e => IO(print(show"$e;")))
           .compile
           .toList
-          .flatMap(result => IO {
-            println("")
-            println(show"Consumed $name stream $result")
-            println(show"----------------------")
+          .flatMap(result =>
+            IO {
+              println("")
+              println(show"Consumed '$name' stream $result")
           })
       )
 

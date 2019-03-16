@@ -10,6 +10,7 @@ import scala.concurrent.duration._
 
 object Main extends IOApp {
 
+  // Flatmapping instead of Apply to run them sequentially
   override def run(args: List[String]): IO[ExitCode] =
     (
       consumeSingletonStream,
@@ -21,7 +22,8 @@ object Main extends IOApp {
       consumeQueueStreamPreDrop,
       splitConsumeQueue,
       multiConsumeQueue,
-    ).tupled
+    )
+      .tupled
       .as(ExitCode.Success)
 
   private def consumeSingletonStream: IO[Unit] =
@@ -55,7 +57,7 @@ object Main extends IOApp {
         ConcurrentEffect[IO]
           .racePair(
             IO.sleep(1.second).productR(Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain),
-            compile("Queue post enqueue", queue.dequeue.take(input.length))
+            compile("Queue post enqueue", queue.dequeue)
           )
           .flatMap {
             case Left((_, fiber))  => fiber.join
@@ -73,7 +75,7 @@ object Main extends IOApp {
         ConcurrentEffect[IO]
           .racePair(
             Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain,
-            IO.sleep(1.second).productR(compile("Queue pre enqueue blocking backpressure", queue.dequeue.take(5)))
+            IO.sleep(1.second).productR(compile("Queue pre enqueue blocking backpressure", queue.dequeue))
           )
           .flatMap {
             case Left((_, fiber))  => fiber.join
@@ -91,7 +93,7 @@ object Main extends IOApp {
         ConcurrentEffect[IO]
           .racePair(
             Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain,
-            IO.sleep(1.second).productR(compile("Queue pre enqueue dropping backpressure", queue.dequeue.take(2)))
+            IO.sleep(1.second).productR(compile("Queue pre enqueue dropping backpressure", queue.dequeue))
           )
           .flatMap {
             case Left((_, fiber))  => fiber.join
@@ -107,15 +109,11 @@ object Main extends IOApp {
           ConcurrentEffect[IO]
             .racePair(
               IO.sleep(1.second).productR(Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain),
-              IO(queue.dequeue.take(2))
+              IO(queue.dequeue)
           ))
       .flatMap {
-        case Left((_, fiber)) =>
-          println("left")
-          fiber.join
-        case Right((fiber, a)) =>
-          println("right")
-          fiber.join.as(a)
+        case Left((_, fiber))  => fiber.join
+        case Right((fiber, a)) => fiber.join.as(a)
       }
 
   private def splitConsumeQueue: IO[Unit] =
@@ -126,15 +124,10 @@ object Main extends IOApp {
       .flatMap(
         queue =>
           ConcurrentEffect[IO]
-            .racePair(compile("QueueHead", queue.head),
-                      IO.sleep(1.second).productR(compile("QueueTail", queue.tail.take(3))))
+            .racePair(compile("QueueSplitHead", queue.head), compile("QueueSplitTail", queue.tail))
             .flatMap {
-              case Left((_, fiber)) =>
-                println("left2")
-                fiber.join
-              case Right((fiber, _)) =>
-                println("right2")
-                fiber.join
+              case Left((_, fiber))  => fiber.join
+              case Right((fiber, _)) => fiber.join
             }
             .void)
 
@@ -146,34 +139,29 @@ object Main extends IOApp {
       .flatMap(
         queue =>
           ConcurrentEffect[IO]
-            .racePair(compile("QueueHead", queue.head), IO.sleep(1.second).productR(compile("QueueTail", queue.tail)))
+            .racePair(compile("QueueMultiFst", queue), compile("QueueMultiSnd", queue))
             .flatMap {
-              case Left((_, fiber)) =>
-                println("left2")
-                fiber.join
-              case Right((fiber, _)) =>
-                println("right2")
-                fiber.join
+              case Left((_, fiber))  => fiber.join
+              case Right((fiber, _)) => fiber.join
             }
             .void)
 
-  private def section[A](block: IO[A]): IO[A] =
+  private def section[A](block: IO[A]): IO[Unit] =
     IO.delay(println("-----------------------"))
-      .productR(block)
-      .productL(IO.delay(println("")))
+      .productR(IO.delay(block.runCancelable(_ => IO.unit).unsafeRunSync()))
+      .productL(IO.sleep(2.seconds))
+      .flatten
+      .productR(IO.delay(println("")))
 
   private def compile[A: Show](name: String, stream: Stream[IO, A]): IO[Unit] =
     IO.delay(println(show"Consuming '$name' stream"))
       .productR(
         stream
-          .evalTap(e => IO(print(show"$e;")))
+          .evalTap(e => IO(print(show"$name -> $e; ")))
           .compile
           .toList
-          .flatMap(result =>
-            IO {
-              println("")
-              println(show"Consumed '$name' stream $result")
-          })
+          .productL(IO.delay(println("")))
+          .flatMap(result => IO.delay(println(show"Consumed '$name' stream $result")))
       )
 
 }

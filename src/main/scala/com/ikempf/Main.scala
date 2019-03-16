@@ -49,6 +49,7 @@ object Main extends IOApp {
   private def consumeQueueStreamPost: IO[Unit] =
     section(queueStreamPost)
 
+  // Data is enqueued after consumption/dequeue starts. No data is lost
   private def queueStreamPost: IO[Unit] =
     Queue
       .unbounded[IO, String]
@@ -67,6 +68,7 @@ object Main extends IOApp {
   private def consumeQueueStreamPre: IO[Unit] =
     section(queueStreamPre)
 
+  // Data is enqueued before consumption. No data is lost since the bounded buffer blocks enqueue. This also works with an unbounded queue...
   private def queueStreamPre: IO[Unit] =
     Queue
       .bounded[IO, String](2)
@@ -85,6 +87,7 @@ object Main extends IOApp {
   private def consumeQueueStreamPreDrop: IO[Unit] =
     section(queueStreamPreDrop)
 
+  // Data is enqueued before consumption. Data is lost since the queue is backed by a limited, non blocking buffer
   private def queueStreamPreDrop: IO[Unit] =
     Queue
       .circularBuffer[IO, String](2)
@@ -117,6 +120,10 @@ object Main extends IOApp {
   private def splitConsumeQueue: IO[Unit] =
     section(splitStream)
 
+  // Data is shared between both streams in an unpredictable manner.
+  // Even though the streams only consume head/tail, all elements are effectively consumed even if some are ignored
+  // The head might thus not be the first element (if the tail stream stole the n first elements)
+  // The tail will contain some but not all elements. It might be missing more than just the head (if the head stream stole n first elements)
   private def splitStream: IO[Unit] =
     aQueue.flatMap(queue =>
       ConcurrentEffect[IO]
@@ -130,6 +137,7 @@ object Main extends IOApp {
   private def multiConsumeQueue: IO[Unit] =
     section(multiStream)
 
+  // Data is shared between both streams in an unpredictable manner.
   private def multiStream: IO[Unit] =
     aQueue.flatMap(queue =>
       ConcurrentEffect[IO]

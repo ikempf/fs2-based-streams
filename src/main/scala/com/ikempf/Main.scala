@@ -1,6 +1,6 @@
 package com.ikempf
 
-import cats.Show
+import cats.{Apply, Show}
 import cats.effect.{ConcurrentEffect, ExitCode, IO, IOApp}
 import cats.implicits._
 import fs2.Stream
@@ -10,20 +10,19 @@ import scala.concurrent.duration._
 
 object Main extends IOApp {
 
-  // Flatmapping instead of Apply to run them sequentially
   override def run(args: List[String]): IO[ExitCode] =
-    (
-      consumeSingletonStream,
-      consumeSeqStream,
-      multiConsumeSeqStream,
-      splitConsumeSeqStream,
-      consumeQueueStreamPost,
-      consumeQueueStreamPre,
-      consumeQueueStreamPreDrop,
-      splitConsumeQueue,
-      multiConsumeQueue,
-    )
-      .tupled
+    Apply[IO]
+      .tuple9(
+        consumeSingletonStream,
+        consumeSeqStream,
+        multiConsumeSeqStream,
+        splitConsumeSeqStream,
+        consumeQueueStreamPost,
+        consumeQueueStreamPre,
+        consumeQueueStreamPreDrop,
+        splitConsumeQueue,
+        multiConsumeQueue,
+      )
       .as(ExitCode.Success)
 
   private def consumeSingletonStream: IO[Unit] =
@@ -53,7 +52,7 @@ object Main extends IOApp {
   private def queueStreamPost: IO[Unit] =
     Queue
       .unbounded[IO, String]
-      .flatMap(queue => {
+      .flatMap(queue =>
         ConcurrentEffect[IO]
           .racePair(
             IO.sleep(1.second).productR(Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain),
@@ -63,7 +62,7 @@ object Main extends IOApp {
             case Left((_, fiber))  => fiber.join
             case Right((fiber, a)) => fiber.join.as(a)
           }
-      })
+      )
 
   private def consumeQueueStreamPre: IO[Unit] =
     section(queueStreamPre)
@@ -71,7 +70,7 @@ object Main extends IOApp {
   private def queueStreamPre: IO[Unit] =
     Queue
       .bounded[IO, String](2)
-      .flatMap(queue => {
+      .flatMap(queue =>
         ConcurrentEffect[IO]
           .racePair(
             Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain,
@@ -81,7 +80,7 @@ object Main extends IOApp {
             case Left((_, fiber))  => fiber.join
             case Right((fiber, a)) => fiber.join.as(a)
           }
-      })
+      )
 
   private def consumeQueueStreamPreDrop: IO[Unit] =
     section(queueStreamPreDrop)
@@ -89,7 +88,7 @@ object Main extends IOApp {
   private def queueStreamPreDrop: IO[Unit] =
     Queue
       .circularBuffer[IO, String](2)
-      .flatMap(queue => {
+      .flatMap(queue =>
         ConcurrentEffect[IO]
           .racePair(
             Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain,
@@ -99,18 +98,17 @@ object Main extends IOApp {
             case Left((_, fiber))  => fiber.join
             case Right((fiber, a)) => fiber.join.as(a)
           }
-      })
+      )
 
   private def aQueue =
     Queue
       .unbounded[IO, String]
-      .flatMap(
-        queue =>
-          ConcurrentEffect[IO]
-            .racePair(
-              IO.sleep(1.second).productR(Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain),
-              IO(queue.dequeue)
-          ))
+      .flatMap(queue =>
+        ConcurrentEffect[IO].racePair(
+          IO.sleep(1.second).productR(Stream.emits[IO, String](input).evalTap(queue.enqueue1).compile.drain),
+          IO(queue.dequeue)
+        )
+      )
       .flatMap {
         case Left((_, fiber))  => fiber.join
         case Right((fiber, a)) => fiber.join.as(a)
@@ -120,31 +118,27 @@ object Main extends IOApp {
     section(splitStream)
 
   private def splitStream: IO[Unit] =
-    aQueue
-      .flatMap(
-        queue =>
-          ConcurrentEffect[IO]
-            .racePair(compile("QueueSplitHead", queue.head), compile("QueueSplitTail", queue.tail))
-            .flatMap {
-              case Left((_, fiber))  => fiber.join
-              case Right((fiber, _)) => fiber.join
-            }
-            .void)
+    aQueue.flatMap(queue =>
+      ConcurrentEffect[IO]
+        .racePair(compile("QueueSplitHead", queue.head), compile("QueueSplitTail", queue.tail))
+        .flatMap {
+          case Left((_, fiber))  => fiber.join
+          case Right((fiber, _)) => fiber.join
+        }
+    )
 
   private def multiConsumeQueue: IO[Unit] =
     section(multiStream)
 
   private def multiStream: IO[Unit] =
-    aQueue
-      .flatMap(
-        queue =>
-          ConcurrentEffect[IO]
-            .racePair(compile("QueueMultiFst", queue), compile("QueueMultiSnd", queue))
-            .flatMap {
-              case Left((_, fiber))  => fiber.join
-              case Right((fiber, _)) => fiber.join
-            }
-            .void)
+    aQueue.flatMap(queue =>
+      ConcurrentEffect[IO]
+        .racePair(compile("QueueMultiFst", queue), compile("QueueMultiSnd", queue))
+        .flatMap {
+          case Left((_, fiber))  => fiber.join
+          case Right((fiber, _)) => fiber.join
+        }
+    )
 
   private def section[A](block: IO[A]): IO[Unit] =
     IO.delay(println("-----------------------"))
